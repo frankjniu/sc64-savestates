@@ -87,6 +87,7 @@ static side_t sides[2] __attribute__((aligned(16)));
 static char vpath[160];
 static char vlabel[LABEL_LEN];
 static uint64_t vcode = 0;          // the game's check code, for a fresh image
+static bool vforeign = false;       // the file is there but not a plain one-bank image, or unreadable: never written
 
 static int port = -1;               // the port whose real pak is shown (0..3), or none
 static bool pak_in[4];
@@ -482,19 +483,38 @@ static void list_build (menu_t *menu) {
     }
 }
 
+// the game's pak file into the virtual side. Only a plain one-bank image is taken; anything
+// else there (a multi-bank image, a dump with a header, a file that does not read back
+// whole) is foreign and left alone, as the launch leaves it. An empty file, a power cut
+// while one was made, counts as no file.
 static void virtual_load (void) {
     side_t *vs = &sides[SIDE_VIRTUAL];
     vs->ok = false;
+    vforeign = false;
     FILE *f = fopen(vpath, "rb");
     if (f) {
-        vs->ok = (fread(vs->img, 1, PAK_LEN, f) == PAK_LEN);
+        size_t got = fread(vs->img, 1, PAK_LEN, f);
+        bool more = (fgetc(f) != EOF);
         fclose(f);
+        vs->ok = (got == PAK_LEN) && !more;
+        vforeign = !vs->ok && ((got != 0) || more);
+    } else if (file_exists(vpath)) {
+        vforeign = true;
     }
     side_parse(vs);
+    if (vs->fs && (vs->banks > 1)) {
+        vs->ok = false;
+        vforeign = true;
+        side_parse(vs);
+    }
 }
 
 // the virtual pak's image to its file (made, with the folders and the game's name, when new)
 static bool virtual_commit (menu_t *menu, char *why, size_t len) {
+    if (vforeign) {
+        snprintf(why, len, "This game's pak file is not a plain one-bank pak image, or could not be read, so it was left alone.");
+        return false;
+    }
     bool existed = file_exists(vpath);
     if (!existed) {
         char dir[160];
@@ -659,6 +679,11 @@ static bool do_copy (menu_t *menu, char *why, size_t len) {
     side_t *src = &sides[op_side];
     side_t *dside = &sides[dst];
     memset(changed, 0, sizeof(changed));
+    if ((op_side == SIDE_REAL) && src->fs && (src->banks > 1)) {
+        // its note table and page tables are not where a one-bank pak keeps them
+        snprintf(why, len, "That Controller Pak has %d banks; notes are moved on one-bank paks only.", src->banks);
+        return false;
+    }
     if (dst == SIDE_REAL) {
         // the pak read again first: it may have been swapped since the columns were drawn
         if (!real_writable(why, len) || !real_backup(menu, why, len)) {
@@ -697,11 +722,11 @@ static bool do_copy (menu_t *menu, char *why, size_t len) {
             snprintf(why, len, "Copied %s onto the real pak in port %d.%s%s", op_name, port + 1,
                      backup_name[0] ? " A backup of its original contents is at " : "", backup_name[0] ? backup_name : "");
         }
-    } else {
+    } else if (ok) {
         side_parse(dside);
-        if (ok) {
-            snprintf(why, len, "Copied %s into this game's virtual pak.", op_name);
-        }
+        snprintf(why, len, "Copied %s into this game's virtual pak.", op_name);
+    } else {
+        virtual_load();                     // what the file holds: the change never reached it
     }
     return ok;
 }
@@ -725,8 +750,10 @@ static bool do_delete_note (menu_t *menu, char *why, size_t len) {
     bool ok = (op_side == SIDE_REAL) ? real_commit(changed, true, why, len) : virtual_commit(menu, why, len);
     if (op_side == SIDE_REAL) {
         real_read(why + (ok ? 0 : strlen(why)), ok ? len : 0);
-    } else {
+    } else if (ok) {
         side_parse(s);
+    } else {
+        virtual_load();                     // what the file holds: the change never reached it
     }
     if (ok) {
         snprintf(why, len, "Deleted %s from the %s.", op_name, side_name(op_side));
@@ -800,6 +827,7 @@ static bool do_delete_pak (char *why, size_t len) {
     if (file_exists(p)) {
         remove(p);
     }
+    vforeign = false;
     sides[SIDE_VIRTUAL].ok = false;
     side_parse(&sides[SIDE_VIRTUAL]);
     snprintf(why, len, "Deleted. The game starts with an empty pak the next time it is launched with the Virtual Controller Pak on.");
@@ -872,7 +900,8 @@ static void opt_clone_to_real (menu_t *menu, void *arg) {
         return;
     }
     if (!sides[SIDE_VIRTUAL].ok) {
-        show_message("This game has no pak file yet, so there is nothing to copy onto the real pak.");
+        show_message(vforeign ? "This game's pak file is not a plain one-bank pak image, so there is nothing to copy onto the real pak."
+                              : "This game has no pak file yet, so there is nothing to copy onto the real pak.");
         return;
     }
     ask = ASK_CLONE_TO_REAL;
@@ -906,6 +935,7 @@ static void process (menu_t *menu) {
         real_backed_up = false;
         sides[SIDE_REAL].ok = false;
         side_parse(&sides[SIDE_REAL]);
+        ask = ASK_NONE;                     // a question about that pak's notes would act on the next pak read in
     }
     if ((port < 0) && !list_screen && (todo == DO_NONE)) {
         port = port_next(3, 1);
@@ -959,7 +989,8 @@ static void process (menu_t *menu) {
             sound_play_effect(SFX_ENTER);
             open_pak(menu, list_sel);
             if (!sides[SIDE_VIRTUAL].ok) {
-                show_message("This pak's file could not be read.");
+                show_message(vforeign ? "This pak's file is not a plain one-bank pak image, or could not be read, so it is left alone. R: Options can delete it."
+                                      : "This pak's file could not be read.");
             }
         } else if (menu->actions.back) {
             sound_play_effect(SFX_EXIT);
@@ -997,6 +1028,8 @@ static void process (menu_t *menu) {
             show_message("No Controller Pak in any port. Plug one into a controller.");
         } else if ((dst == SIDE_REAL) && !sides[SIDE_REAL].fs) {
             show_message("The real pak holds no pak file system. Format it in the Controller Pak manager first.");
+        } else if (sides[SIDE_REAL].fs && (sides[SIDE_REAL].banks > 1)) {
+            show_message("That Controller Pak has more than one bank; notes are moved on one-bank paks only.");
         } else {
             op_side = col;
             op_slot = note->slot;
@@ -1141,6 +1174,10 @@ static void draw_pak (menu_t *menu) {
     } else if (vs->ok) {
         snprintf(counts, sizeof(counts), "\n\n\nnot a formatted pak\n");
         names[0] = '\0';
+        sizes[0] = '\0';
+    } else if (vforeign) {
+        snprintf(counts, sizeof(counts), "\n\n\nnot a one-bank pak image\n");
+        snprintf(names, sizeof(names), "  Left alone, as the launch\n  leaves it. R: Options can\n  delete it.\n");
         sizes[0] = '\0';
     } else {
         snprintf(counts, sizeof(counts), "\n\n\nno file yet\n");

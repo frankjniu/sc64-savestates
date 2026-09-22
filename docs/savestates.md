@@ -60,7 +60,7 @@ misses, or off for a game where you want a real pak (`vpak_enabled=1` or `0` in 
 ROM's `.ini`; `vpak_port=2` for a port other than 1). A port other than 1 needs a
 controller plugged into it when the game boots, since a game only talks to the ports
 it found then. The pak can also be taken out and put back, in any port, while the
-game runs: see the panel's Game page below.
+game runs: see the panel's Game page below (the panel opens with Save States on).
 
 **Slow motion** is in the same menu, off by default. On, the routine stays resident in
 the top 128 KiB of RAM instead of living on the cartridge, which is what lets it hold
@@ -96,9 +96,10 @@ A hotkey is one button or more, held for a moment. The game never sees a hotkey'
 buttons while it is held, so a single-button hotkey takes that button away from the
 game. No hotkey may sit inside another. The frame step button, which acts only at
 the panel's Step speed, may share buttons with the hotkeys but not with the screenshot
-button, a tap that works at Step speed too. L + R + Start is refused: an original N64 controller
-answers that combination with its stick reset and never reports the Start, so it
-cannot work as a hotkey. Stored as `hotkey_save`, `hotkey_load`, `hotkey_panel`, `hotkey_step` and
+button, a tap that works at Step speed too. L + R + Start can't be a hotkey: an original
+N64 controller answers that combination with its stick reset and never reports the Start,
+so the page sees only L + R from one (and refuses the three from a controller that
+reports them). Stored as `hotkey_save`, `hotkey_load`, `hotkey_panel`, `hotkey_step` and
 `screenshot_button` in the ROM's `.ini` (button names joined by `+`, as in
 `L+R+Up`), and under `[savestates]` in `sd:/menu/config.ini` for every game's. A
 `hotkey_save_set` number (and so on) beside each says which of the two was set last:
@@ -119,7 +120,8 @@ the stock menu, and the states and the pak ride along with it.
 
 These are the defaults; the ROM's options page and the menu's settings can set others
 (see above). The panel's Slots page shows the two quick combos in use, and the ROM's
-page in the menu lists them.
+page in the menu lists them. They work in a game with Save States on; in one with only
+the virtual pak or the screenshot button, their buttons go to the game as usual.
 
 The game freezes for about two seconds on a save and about a second and a half on a
 load, then carries on. With Slow motion on for the game, "STATE SAVED" or "STATE
@@ -202,9 +204,11 @@ the cartridge clock's time (`Super Mario 64 YYYY-MM-DD HH-MM-SS.png`), and the m
 file browser shows them like any image. Between a shot and the next visit to the menu
 they wait inside `sd:/screenshots/pending.bin`, a file the menu keeps allocated in
 advance, because the routine in the game can write into a file but not create one.
-It is 64 MiB where the card has the room, enough for about 280 screenshots of a
-320x240 game or 70 of a 640x480 one per launch. The next visit to the menu files them
-and empties it again; "SCREENSHOTS FULL" means it is full until then.
+It is 64 MiB where the card has the room once the game's state files and pak are made,
+enough for about 280 screenshots of a 320x240 game or 70 of a 640x480 one per launch.
+The next visit to the menu files them and empties it again; "SCREENSHOTS FULL" means it
+is full until then. A shot the menu cannot copy out (a full card) stays in the file for
+its next start, and until it is out a launch takes no new ones ("NO SCREENSHOT FILE").
 
 In the menu's file browser a highlighted image shows a preview beside the list, and in
 the image viewer L, R, C-Left, C-Right and the D-pad move to the previous or next image
@@ -233,6 +237,8 @@ open it, and a fresh one is formatted the first time a game boots with the optio
 on. One pak per game. A file of another size there, copied by hand (a multi-bank
 image, a DexDrive dump with its header), is left alone and the launch stops and says
 so: replace it with a one-bank image, or delete it and the game starts with a fresh pak.
+Manage saves (below) leaves such a file alone as well, and so does a launch that cannot
+read the game's pak file: it runs without the virtual pak rather than make a new one.
 
 The answers are given from inside the game's own interrupt handler. At boot the
 routine finds the place in libultra's exception handler where a finished controller
@@ -256,9 +262,9 @@ launch accepts that. The other ports are the
 game's as usual: a Rumble Pak in port 1 with the virtual pak in port 2, say, works in
 a game that takes a Controller Pak in any port (Perfect Dark). A game that wants both
 in the same port at different times (Beetle Adventure Racing asks for a Controller
-Pak to save and a Rumble Pak to race) gets them from the panel's Pak row: take the
-pak out when the game asks for the Rumble Pak, put it back when it asks for the
-Controller Pak. The virtual pak answers as a Controller Pak does (reads in the Rumble
+Pak to save and a Rumble Pak to race) gets them from the panel's Pak row, with Save
+States on for it: take the pak out when the game asks for the Rumble Pak, put it back
+when it asks for the Controller Pak. The virtual pak answers as a Controller Pak does (reads in the Rumble
 Pak's detection area come back as zeros), so a game that supports both takes it for
 a Controller Pak and does not try to rumble it.
 
@@ -284,8 +290,9 @@ pak on the right, with the port it was found in.
   `sd:/cpak_saves` first, as a `.pak` the Controller Pak manager can restore.
 
 Paks with more than one bank (some third-party ones) are left alone in either
-direction, and a real pak with no file system on it (never formatted, or damaged)
-is not written to; format it in the Controller Pak manager first. A pak made before
+direction. A real pak with no file system on it (never formatted, or damaged) takes
+and gives no single notes; format it in the Controller Pak manager first, or clone the
+virtual pak onto it, which replaces whatever it holds (after the backup). A pak made before
 this version shows up under the name of its first note until its game is launched
 once, which records the game's file name beside the pak; an empty one without a name
 is left off the list until then, since nothing says whose it is. A note whose name or
@@ -757,7 +764,7 @@ This build hangs a second routine off the same path, and keeps it off the consol
 - When a save or a load is due, the monitor waits for a clean moment (a frame
   boundary with the RSP halted, the RDP idle and no cartridge or controller
   transfer in flight), copies the top 128 KiB of RAM to a stash on the cartridge,
-  copies the 110 KB **hook** in its place, and runs it. The hook captures the CPU
+  copies the 119 KiB **hook** in its place, and runs it. The hook captures the CPU
   context (all registers, the FPU, the TLB, Status and EPC), the pending interrupt
   mask, the RDP and RSP status bits, the DMA address registers, the video registers
   and the CPU cycle counter, copies RAM to the cartridge with the PI DMA engine (its

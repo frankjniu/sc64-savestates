@@ -402,11 +402,12 @@ void sc64ss_vpak_label_store(const char *pak_path, const char *rom_name);
 void sc64ss_pak_format(uint8_t *img, uint32_t crc1, uint32_t crc2);
 
 /**
- * @brief SC64SS: screenshots a game left in the pending folder, moved to the game's own.
+ * @brief SC64SS: screenshots a game left in the pending file, copied to the game's own folder.
  *
  * @param storage_prefix The storage prefix ("sd:").
+ * @return the shots that could not be copied out and stay in the file (0: it is empty again)
  */
-void sc64ss_shots_finish(const char *storage_prefix);
+uint32_t sc64ss_shots_finish(const char *storage_prefix);
 void ui_components_file_list_set_width(int width);   // SC64SS: 0 = the full width (a preview beside the list otherwise)
 
 /**

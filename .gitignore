@@ -13,6 +13,13 @@
 /filesystem/*.wav64
 /filesystem/*.sprite
 
+# SC64SS: ignore the intermediates src/boot/hook/build.sh leaves beside its sources
+# (its outputs, src/boot/hook_blob.c and hook_blob.h, are tracked)
+/src/boot/hook/*.o
+/src/boot/hook/*.elf
+/src/boot/hook/*.bin
+/src/boot/hook/hook.map
+
 # Ignore external development tools
 /tools/*
 

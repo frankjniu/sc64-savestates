@@ -160,5 +160,17 @@ void settings_save (settings_t *settings) {
 }
 
 void settings_reset_to_defaults() {
+    // SC64SS: the counts of every-game hotkey sets outlive the reset. A game's own hotkey counts
+    // while its own count is no lower than the menu's, so counts back at 0 would let keys set
+    // before the reset outrank every-game sets made after it.
+    settings_t kept = init;
+    ini_t *ini = ini_try_load(settings_path);
+    kept.ss_key_set_save = ini_get_int(ini, "savestates", "hotkey_save_set", 0);
+    kept.ss_key_set_load = ini_get_int(ini, "savestates", "hotkey_load_set", 0);
+    kept.ss_key_set_panel = ini_get_int(ini, "savestates", "hotkey_panel_set", 0);
+    kept.ss_key_set_step = ini_get_int(ini, "savestates", "hotkey_step_set", 0);
+    kept.ss_key_set_shot = ini_get_int(ini, "savestates", "screenshot_button_set", 0);
+    ini_free(ini);
     remove(settings_path);
+    settings_save(&kept);
 }

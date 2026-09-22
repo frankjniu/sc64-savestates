@@ -294,21 +294,25 @@ static void cheats_update_cache (volatile void *start, volatile void *end) {
 // back and drops them from the I-cache (the same sequence the engine copy uses).
 static io32_t *cheats_emit_copy (io32_t *p, uint32_t src, uint32_t dst, uint32_t words) {
     uint32_t src_end = src + 4 * words;
+    // the lines are written back from the start of the first one, t6 counting from the
+    // offset into it: a home that is not line aligned (0x1DC) spans one line more than its
+    // bytes do, and counted from dst the last one was left dirty in the D-cache
+    uint32_t line = dst & ~(uint32_t) (D_CACHE_LINE_SIZE - 1);
     *p++ = I_LUI(REG_T3, A_BASE(src));
     *p++ = I_ADDIU(REG_T3, REG_T3, A_OFFSET(src));
     *p++ = I_LUI(REG_T4, A_BASE(src_end));
     *p++ = I_ADDIU(REG_T4, REG_T4, A_OFFSET(src_end));
     *p++ = I_LUI(REG_T5, A_BASE(dst));
     *p++ = I_ADDIU(REG_T5, REG_T5, A_OFFSET(dst));
-    *p++ = I_ORI(REG_T6, REG_ZERO, 0);
+    *p++ = I_ORI(REG_T6, REG_ZERO, dst - line);
     *p++ = I_LW(REG_K1, 0, REG_T3);
     *p++ = I_SW(REG_K1, 0, REG_T5);
     *p++ = I_ADDIU(REG_T3, REG_T3, 4);
     *p++ = I_ADDIU(REG_T5, REG_T5, 4);
     *p++ = I_BNE(REG_T3, REG_T4, -5);
     *p++ = I_ADDIU(REG_T6, REG_T6, 4);
-    *p++ = I_LUI(REG_T5, A_BASE(dst));
-    *p++ = I_ADDIU(REG_T5, REG_T5, A_OFFSET(dst));
+    *p++ = I_LUI(REG_T5, A_BASE(line));
+    *p++ = I_ADDIU(REG_T5, REG_T5, A_OFFSET(line));
     *p++ = I_CACHE(HIT_WRITE_BACK_D, 0, REG_T5);
     *p++ = I_CACHE(HIT_INVALIDATE_I, 0, REG_T5);
     *p++ = I_ADDIU(REG_T6, REG_T6, -D_CACHE_LINE_SIZE);
@@ -344,11 +348,13 @@ bool cheats_install (cic_type_t cic_type, uint32_t *cheat_list, const uint32_t *
     // https://github.com/parasyte/alt64/blob/master/utils.c#L1024-L1054
 
     uint32_t ori_placeholder_instruction = I_ORI(REG_ZERO, REG_K0, A_OFFSET(RELOCATED_EXCEPTION_HANDLER_ADDRESS));
-    uint32_t ori_placeholder_address = (uint32_t)(final_engine_address + 20);
+    // SC64SS: the placeholder is the engine's word 20 after the usual 4-word prologue; the
+    // diagnostic one below is 9 words, and the store would otherwise patch a lui instead
+    uint32_t ori_placeholder_address = (uint32_t)(final_engine_address + 20 + (SC64SS_DIAG_WATCHEPC ? 5 : 0));
 
 #if SC64SS_DIAG_WATCHEPC
     // the EPC of the last WATCH exception at +0x1FC8 (a second store here would need a
-    // PI wait: a PIO write while the previous one is still busy is dropped). Six words
+    // PI wait: a PIO write while the previous one is still busy is dropped). Five words
     // more than the real engine: only for the resident placement, where 0x0F0..0x117
     // is free (the borrowed exit stub lives there).
     *engine_p++ = I_MFC0(REG_K1, C0_REG_CAUSE);
@@ -884,6 +890,14 @@ bool cheats_install (cic_type_t cic_type, uint32_t *cheat_list, const uint32_t *
     // Jump back to the game code
     *patcher_p++ = I_JR(REG_T1);
     *patcher_p++ = I_NOP();
+
+    // SC64SS: a libdragon ROM gets the patcher and the engine's copy back from the cart, 4 KiB
+    // of each (cheats.h): more (a long list of codes) would come back cut short and the game
+    // would run into it at its first exception, so nothing is installed and it runs as ever
+    if (libdragon && (((uint32_t) (patcher_p - patcher_start) > SC64SS_LDBOOT_REGION_WORDS) ||
+                      ((uint32_t) (engine_p - engine_start) > SC64SS_LDBOOT_REGION_WORDS))) {
+        return false;
+    }
 
     cheats_update_cache(engine_start, engine_p);
     cheats_update_cache(patcher_start, patcher_p);

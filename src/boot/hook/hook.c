@@ -108,7 +108,9 @@ typedef volatile uint16_t vu16;
 
 /* Cart SDRAM above the ROM (PI addresses). build.sh exports these to the menu
  * (hook_blob.h), which lays the slot table out from the ROM size:
- *   ROM end (1 MiB aligned) .. 0x13F60000  state slots, STATE_SLOT_LEN each
+ *   ROM end (1 MiB aligned) .. 0x13E20000  state slots, STATE_SLOT_LEN_B each (a libdragon ROM's
+ *                             stop at 0x13800000, load_rom.c SC64SS_LIBDRAGON_SLOT_TOP)
+ *   0x13E20000 .. 0x13F60000  the frame stash (FRAME_STASH_PI: the picture under the panel)
  *   0x13F60000 .. 0x13F80000  the hook's staging copy (the boot patcher and the
  *                             reinstall stub copy it into RDRAM; blob <= 128 KiB,
  *                             its RDRAM home 0x807D0000..0x807F0000)
@@ -133,8 +135,8 @@ typedef volatile uint16_t vu16;
  *                             (+0x220 the game's Count/Compare across a borrow)
  *   0x13FC0000 .. 0x13FE0000  borrowed-RAM mode: the stash of the hook's home (128 KiB)
  *   0x13FE0000 .. 0x14000000  the SC64's SRAM/FlashRAM save area, never touched
- * Slots: 7 for ROMs up to 8 MiB, 6 up to 16 MiB, 4 for 32 MiB, 3 for 40 MiB
- * (Paper Mario), none for 64 MiB. */
+ * Slots: 7 for ROMs up to 4 MiB, 6 for 8 and 12 MiB, 5 for 16, 4 for 24, 3 for 32, 2 for 40
+ * (Paper Mario), 1 for 48, none for 64 MiB. */
 #define HOOK_STAGING_PI 0x13F60000u
 #define HOOK_HOME_OFF   0x007D0000u /* the hook's RDRAM home (resident: lives there; borrowed: borrows it) */
 #define FRAME_STASH_PI  0x13E20000u  /* the picture under the panel: just below the staging, 1.25 MiB (a 640x480x4

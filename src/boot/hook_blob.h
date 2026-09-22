@@ -40,7 +40,7 @@
 #define SC64SS_SHOT_HDR_PI (0x13F81000UL)   /* the screenshot file's header block (4 KiB) */
 #define SC64SS_SHOT_HDR_SECTORS (0x8UL)   /* the header block's sectors */
 #define SC64SS_SHOT_ENTRIES_MAX (0x1FCUL)   /* screenshots the header block can name */
-#define SC64SS_SD_MAGIC_SHOT (0x53484354UL)   /* a fresh screenshot file's marker 'SHFR' */
+#define SC64SS_SD_MAGIC_SHOT (0x53484354UL)   /* the screenshot file's header magic 'SHCT' */
 #define SC64SS_HOOK_STAGING_LEN (0x20000UL)
 
 extern const uint32_t sc64ss_hook_blob[];

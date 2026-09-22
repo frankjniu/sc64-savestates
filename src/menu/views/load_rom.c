@@ -91,9 +91,9 @@ static bool sc64ss_state_file_runs (char *fp, uint32_t *table, uint32_t *total, 
     return true;
 }
 
-// SC64SS: the state slots live in cart SDRAM above the ROM, SC64SS_STATE_SLOT_LEN apart
-// (1 MiB aligned after the ROM), below the hook's staging copy; hook_blob.h carries the
-// layout the hook was built with. Returns the slot count (0: the ROM leaves no room).
+// SC64SS: the state slots live in cart SDRAM above the ROM, `stride` apart (SC64SS_STATE_SLOT_LEN_B
+// for both placements) from the first 1 MiB boundary after it, below the frame stash; hook_blob.h
+// carries the layout the hook was built with. Returns the slot count (0: the ROM leaves no room).
 // A libdragon ROM keeps its slots below the last 8 MiB of the cart's memory: libdragon's USB
 // logging puts a game's prints there (usb.c, DEBUG_ADDRESS), inside the slot that reaches it.
 #define SC64SS_LIBDRAGON_SLOT_TOP 0x13800000UL
@@ -201,7 +201,11 @@ static void sc64ss_prepare_state_files (menu_t *menu, uint32_t *cfg, uint32_t n,
 #endif
 #define SC64SS_SHOTS_SIZE_MAX  (64UL * 1024 * 1024)
 #define SC64SS_SHOTS_SIZE_MIN  (4UL * 1024 * 1024)
-#define SC64SS_SHOTS_OWNER_OFF (2048)
+// the owner's name, near the block's end: the routine writes entry i at 32 + 8 * i for up to
+// SC64SS_SHOT_ENTRIES_MAX of them, so a name at 2048 (where earlier menus put it) was run over
+// by the 253rd shot of a launch, and every shot of that launch was filed under "unknown"
+#define SC64SS_SHOTS_OWNER_OFF (0xF00)
+#define SC64SS_SHOTS_OWNER_OFF_OLD (2048)
 
 // a file's cluster runs as a run table for the hook (SDR1, n, total, n x {sector, file
 // sector, count}), without a list of every sector: a large file fits only when it lies in
@@ -281,7 +285,12 @@ static uint32_t __attribute__((unused)) sc64ss_prepare_shot_file (menu_t *menu, 
     uint32_t sectors = 0, total = 0;
     char owner[256];
 
-    sc64ss_shots_finish(menu->storage_prefix);   // (nothing of the last game's is left inside)
+    if (sc64ss_shots_finish(menu->storage_prefix) > 0) {
+        // shots of the last game that could not be copied out (a full card, say): the file
+        // keeps them for the next start of the menu, and this launch takes no new ones
+        debugf("SC64SS: screenshots of the last game still in the file: none this launch\n");
+        return 0;
+    }
 
     path_t *dir = path_init(menu->storage_prefix, SC64SS_SHOTS_DIR);
     if (!directory_exists(path_get(dir)) && directory_create(path_get(dir))) {
@@ -365,8 +374,10 @@ static uint32_t __attribute__((unused)) sc64ss_prepare_shot_file (menu_t *menu, 
     return sectors;
 }
 
-// the last game's screenshots out of the pending file, into the game's folder
-void sc64ss_shots_finish (const char *storage_prefix) {
+// the last game's screenshots out of the pending file, into the game's folder. A shot that
+// cannot be copied out (a full card, a folder that cannot be made) stays in the file for the
+// next start; returns how many stay, 0 when the file is empty again
+uint32_t sc64ss_shots_finish (const char *storage_prefix) {
     static uint32_t hdr[1024] __attribute__((aligned(16)));
     char owner[80];
     path_t *file = path_init((char *) storage_prefix, SC64SS_SHOTS_DIR);
@@ -375,18 +386,27 @@ void sc64ss_shots_finish (const char *storage_prefix) {
     FILE *f = fopen(fp, "r+b");
     if (!f) {
         path_free(file);
-        return;
+        return 0;
     }
     setbuf(f, NULL);
     if ((fread(hdr, 1, sizeof(hdr), f) != sizeof(hdr)) || (hdr[0] != SC64SS_SD_MAGIC_SHOT) ||
         (hdr[3] == 0) || (hdr[3] > SC64SS_SHOT_ENTRIES_MAX)) {
         fclose(f);
         path_free(file);
-        return;
+        return 0;
     }
     uint32_t count = hdr[3];
     int64_t size = (fseek(f, 0, SEEK_END) == 0) ? ftell(f) : 0;
-    snprintf(owner, sizeof(owner), "%.79s", (const char *) hdr + SC64SS_SHOTS_OWNER_OFF);
+    // the name where the entries did not reach it: at 0xF00, else (a file an earlier menu
+    // made) at 2048
+    const char *name = "";
+    if (count <= ((SC64SS_SHOTS_OWNER_OFF - 32) / 8)) {
+        name = (const char *) hdr + SC64SS_SHOTS_OWNER_OFF;
+        if (!name[0] && (count <= ((SC64SS_SHOTS_OWNER_OFF_OLD - 32) / 8))) {
+            name = (const char *) hdr + SC64SS_SHOTS_OWNER_OFF_OLD;
+        }
+    }
+    snprintf(owner, sizeof(owner), "%.79s", name);
     for (char *p = owner; *p; p++) {
         if (strchr("\\/:*?\"<>|\r\n", *p)) {
             *p = '_';
@@ -396,6 +416,12 @@ void sc64ss_shots_finish (const char *storage_prefix) {
         snprintf(owner, sizeof(owner), "unknown");
     }
     uint8_t *buf = malloc(32768);
+    if (buf == NULL) {                            // nothing copied, so nothing leaves the file
+        fclose(f);
+        path_free(file);
+        return count;
+    }
+    uint32_t kept = 0;                            // entries left for the next start, packed at the front
     path_t *gdir = path_init((char *) storage_prefix, SC64SS_SHOTS_DIR);
     path_push(gdir, owner);
     if (!directory_exists(path_get(gdir))) {
@@ -467,33 +493,49 @@ void sc64ss_shots_finish (const char *storage_prefix) {
             path_push(dst, fname);
         }
         FILE *o = fopen(path_get(dst), "wb");
+        bool filed = false;
         if (o) {
             uint32_t left = len;
-            if (fseek(f, (long) sector * 512, SEEK_SET) != 0) {
-                left = 0;
-            }
-            while (left) {
-                uint32_t n = (left > 32768) ? 32768 : left;
-                if ((fread(buf, 1, n, f) != n) || (fwrite(buf, 1, n, o) != n)) {
-                    break;
+            if (fseek(f, (long) sector * 512, SEEK_SET) == 0) {
+                while (left) {
+                    uint32_t n = (left > 32768) ? 32768 : left;
+                    if ((fread(buf, 1, n, f) != n) || (fwrite(buf, 1, n, o) != n)) {
+                        break;
+                    }
+                    left -= n;
                 }
-                left -= n;
+                filed = (left == 0);
             }
-            fclose(o);
-            debugf("SC64SS: screenshot %lu -> %s (%s)\n", (unsigned long) i, path_get(dst), left ? "short" : "ok");
+            bool closed = (fclose(o) == 0);
+            filed = filed && closed;
+            if (!filed) {
+                remove(path_get(dst));            // no half a shot under its name
+            }
+            debugf("SC64SS: screenshot %lu -> %s (%s)\n", (unsigned long) i, path_get(dst), filed ? "ok" : "kept for later");
+        }
+        if (!filed) {
+            hdr[8 + 2 * kept] = sector;           // (kept <= i: this entry was read already)
+            hdr[9 + 2 * kept] = len;
+            kept++;
         }
         path_free(dst);
     }
     free(buf);
     path_free(gdir);
-    hdr[3] = 0;                                   // the file empty again
-    hdr[5] = SC64SS_SHOT_HDR_SECTORS;
-    memset(&hdr[8], 0, (SC64SS_SHOTS_OWNER_OFF / 4 - 8) * 4);
+    hdr[3] = kept;                                // the shots filed leave the file; any others stay
+    if (kept == 0) {
+        hdr[5] = SC64SS_SHOT_HDR_SECTORS;         // the file empty again
+    }
+    uint32_t clear_from = 8 + 2 * kept, clear_to = SC64SS_SHOTS_OWNER_OFF / 4;
+    if (clear_from < clear_to) {
+        memset(&hdr[clear_from], 0, (clear_to - clear_from) * 4);
+    }
     if (fseek(f, 0, SEEK_SET) == 0) {
         fwrite(hdr, 1, sizeof(hdr), f);
     }
     fclose(f);
     path_free(file);
+    return kept;
 }
 
 // SC64SS: a freshly formatted Controller Pak image (one bank), laid out the way
@@ -593,11 +635,17 @@ static bool sc64ss_prepare_pak (menu_t *menu) {
             // not a plain one-bank image but a file copied here by hand: never overwritten (the
             // launch refuses before this); an empty one, a power cut while it was made, is remade
             foreign = true;
-        } else {
+        } else if (size != 0) {
             size_t got = fread(img, 1, SC64SS_VPAK_LEN, f);
             ok = (got == SC64SS_VPAK_LEN);
+            foreign = !ok;                  // a read that failed: the saves may well be fine on the card, so not remade
         }
         fclose(f);
+    } else if (file_exists(fp)) {
+        foreign = true;                     // there but it would not open: left alone as well
+    }
+    if (!ok && foreign) {
+        debugf("SC64SS: pak file %s left alone, no virtual pak this launch\n", fp);
     }
     if (!ok && !foreign) {
         sc64ss_pak_format(img, crc1, crc2);
@@ -1521,7 +1569,7 @@ static void process (menu_t *menu) {
 }
 
 static void draw (menu_t *menu, surface_t *d) {
-    char key_save_text[40], key_load_text[40];
+    char key_save_text[SC64SS_KEY_TEXT_LEN], key_load_text[SC64SS_KEY_TEXT_LEN];
     rdpq_attach(d, NULL);
 
     ui_components_background_draw();
@@ -1942,13 +1990,15 @@ static void load (menu_t *menu) {
                             }
                             sc64ss_cfg[1] = ce_slots_n;
                             sc64ss_cfg[15] = (uint32_t) rom_size;
-                            sc64ss_cfg[10] = ce_key_save;     // hook_cfg.combo_save
-                            sc64ss_cfg[11] = ce_key_load;     // hook_cfg.combo_load
-                            sc64ss_cfg[24] = ce_key_panel;    // hook_cfg.combo_menu
+                            // SC64SS: without save states there are no slots, and the hook takes no save,
+                            // load or panel request then (state_queue): those combos stay off, so their
+                            // buttons reach the game instead of being held back for nothing
+                            sc64ss_cfg[10] = ce_states ? ce_key_save : 0;     // hook_cfg.combo_save
+                            sc64ss_cfg[11] = ce_states ? ce_key_load : 0;     // hook_cfg.combo_load
+                            sc64ss_cfg[24] = ce_states ? ce_key_panel : 0;    // hook_cfg.combo_menu
 #if SC64SS_HOOK_CFG_WORDS > 44
                             sc64ss_cfg[40] = ce_key_step;     // hook_cfg.combo_step
                             sc64ss_cfg[41] = ce_key_shot;     // hook_cfg.combo_shot
-                            sc64ss_cfg[42] = ce_shots ? sc64ss_prepare_shot_file(menu, sc64ss_cfg) : 0;   // hook_cfg.shot_sectors (+ shot_fill, shot_count)
 #endif
                             // Always capture the full 8 MiB. The 4 MiB "half the
                             // freeze" shortcut trusted rom_info's Expansion Pak
@@ -1969,6 +2019,11 @@ static void load (menu_t *menu) {
                                 sc64ss_cfg[27] |= 4;       // hook_cfg.spare bit 2: the virtual pak is in
                                 sc64ss_cfg[27] |= (uint32_t) ((menu->load.rom_info.settings.vpak_port - 1) & 3) << 12;   // bits 12..13: its port at launch
                             }
+#if SC64SS_HOOK_CFG_WORDS > 44
+                            // SC64SS: the screenshot file after the state files and the pak: it takes
+                            // what room is left (up to 64 MiB), so a full card costs screenshots, not saves
+                            sc64ss_cfg[42] = ce_shots ? sc64ss_prepare_shot_file(menu, sc64ss_cfg) : 0;   // hook_cfg.shot_sectors (+ shot_fill, shot_count)
+#endif
                             data_cache_hit_writeback(sc64ss_cfg, sizeof(sc64ss_cfg));
                             dma_write(sc64ss_cfg, SC64SS_HOOK_STAGING_PI + SC64SS_HOOK_CFG_OFFSET, sizeof(sc64ss_cfg));
                             if (menu->load.rom_info.check_code_from_content) {
@@ -2192,18 +2247,26 @@ void view_load_rom_preset (menu_t *menu, path_t *path) {
     usb_preset = true;
     menu->load_pending.rom_file = true;
     if (menu->mode == MENU_MODE_LOAD_ROM) {
+        deinit();                           // the page's box art goes before its init runs again
         menu->mode = MENU_MODE_NONE;
     }
     menu->next_mode = MENU_MODE_LOAD_ROM;
 }
 
 void view_load_rom_init (menu_t *menu) {
+#ifdef FEATURE_AUTOLOAD_ROM_ENABLED
+    // SC64SS: the ROM is the autoload's only on the way in from the startup view, which leaves
+    // a load pending. After an autoload that failed (its ROM renamed or gone) the browser's
+    // choices count again; keyed on the setting alone, the next choice kept the failed path
+    // (a NULL one after a failed read: a crash)
+    bool autoload_entry = menu->settings.rom_autoload_enabled && menu->load_pending.rom_file;
+#endif
     if (usb_preset) {
         usb_preset = false;                 // SC64SS: the path is the view's already
         rom_filename = path_last_get(menu->load.rom_path);
     } else
 #ifdef FEATURE_AUTOLOAD_ROM_ENABLED
-    if (!menu->settings.rom_autoload_enabled)
+    if (!autoload_entry)
 #endif
     {
         if (menu->load.rom_path) {
@@ -2239,6 +2302,7 @@ void view_load_rom_init (menu_t *menu) {
         //disable the attempt at loading the favorite / history
         menu->load.load_history_id = -1;
         menu->load.load_favorite_id = -1;
+        menu->load_pending.rom_file = false;    // SC64SS: nothing to boot: the next ROM page waits for A
         // FIXME: use bookkeeping_favorite_remove() here instead of just showing an error and leaving the broken favorite / history item in place
         menu_show_error(menu, convert_error_message(err));
         return;
@@ -2255,7 +2319,7 @@ void view_load_rom_init (menu_t *menu) {
     }
 
 #ifdef FEATURE_AUTOLOAD_ROM_ENABLED
-    if (!menu->settings.rom_autoload_enabled) {
+    if (!autoload_entry) {
 #endif
         current_metadata_image_index = 0;
         boxart = ui_components_boxart_init(menu->storage_prefix, menu->load.rom_info.game_code, menu->load.rom_info.title, IMAGE_BOXART_FRONT);
@@ -2282,8 +2346,11 @@ void view_load_rom_display (menu_t *menu, surface_t *display) {
     }
 
     if (menu->next_mode != MENU_MODE_LOAD_ROM && menu->next_mode != MENU_MODE_DATEL_CODE_EDITOR) {
-        if (menu->next_mode != MENU_MODE_HOTKEYS) {   // SC64SS: the hotkeys page comes back to this ROM,
-            menu->load.load_history_id = -1;          // wherever it was opened from
+        // SC64SS: the hotkeys page and Manage saves (the virtual paks view) come back to this
+        // ROM, wherever it was opened from; without the ids its path would be rebuilt from the
+        // browser's highlighted entry, another file, a folder or (an empty folder) none at all
+        if ((menu->next_mode != MENU_MODE_HOTKEYS) && (menu->next_mode != MENU_MODE_VIRTUAL_PAK)) {
+            menu->load.load_history_id = -1;
             menu->load.load_favorite_id = -1;
         }
         deinit();

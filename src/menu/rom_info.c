@@ -1514,12 +1514,18 @@ static uint64_t rom_content_check_code (path_t *path) {
     return (((uint64_t) (uint32_t) (crc)) << 32) | ((uint64_t) (uint32_t) (size));
 }
 
+// SC64SS: a word of a byte-swapped (.v64) file in the console's order, as the cart gets it
+// (cart_load.c) and boot.c reads it
+static uint32_t rom_word_native (uint32_t w, bool byte_swap) {
+    return byte_swap ? (((w >> 8) & 0x00FF00FFUL) | ((w << 8) & 0xFF00FF00UL)) : w;
+}
+
 // SC64SS: libdragon's entry code from before it had its own boot code (2010 to early 2023)
 // began, for all those years, with the stack set from the memory-size word the retail boot
 // code leaves at 0x80000318: lui t0,0x8000; lw t0,0x318(t0); lui t1,0x7FFF; ori t1,t1,0xFFF0;
 // addu sp,t0,t1. Such a game then copies its own exception vectors over the routine's way in
 // and never comes up with it installed, so the routine stays out for it.
-static bool rom_old_libdragon_entry (path_t *path) {
+static bool rom_old_libdragon_entry (path_t *path, bool byte_swap) {
     static uint32_t code[64] __attribute__((aligned(16)));
     static const uint32_t stack_words[5] = { 0x3C088000, 0x8D080318, 0x3C097FFF, 0x3529FFF0, 0x0109E821 };
     FILE *f = fopen(path_get(path), "rb");
@@ -1532,6 +1538,9 @@ static bool rom_old_libdragon_entry (path_t *path) {
         n = fread(code, sizeof(uint32_t), 64, f);
     }
     fclose(f);
+    for (size_t i = 0; i < n; i++) {
+        code[i] = rom_word_native(code[i], byte_swap);
+    }
     for (size_t i = 0; i + 5 <= n; i++) {
         if (memcmp(&code[i], stack_words, sizeof(stack_words)) == 0) {
             return true;
@@ -1546,7 +1555,7 @@ static bool rom_old_libdragon_entry (path_t *path) {
 // 256-byte boundary within the first 128 KiB, the pair exactly once before it. A boot code
 // newer than this (nothing found, or more than one) keeps the routine out, so the game runs
 // as it always did.
-static bool rom_libdragon_handoff (path_t *path) {
+static bool rom_libdragon_handoff (path_t *path, bool byte_swap) {
     static uint32_t buf[1024] __attribute__((aligned(16)));
     FILE *f = fopen(path_get(path), "rb");
     if (f == NULL) {
@@ -1561,7 +1570,7 @@ static bool rom_libdragon_handoff (path_t *path) {
             break;
         }
         for (uint32_t i = 0; i < 1024; i++) {
-            uint32_t w = buf[i];
+            uint32_t w = rom_word_native(buf[i], byte_swap);
             if ((((off + (4 * i)) & 0xFF) == 0) && (w == 0x7F454C46UL)) {
                 elf = off + (4 * i);
                 break;
@@ -1606,8 +1615,9 @@ rom_err_t rom_config_load (path_t *path, rom_info_t *rom_info) {
             break;
         }
     }
-    rom_info->libdragon_old = (!rom_info->libdragon) && rom_old_libdragon_entry(path);
-    rom_info->libdragon_handoff = rom_info->libdragon && rom_libdragon_handoff(path);
+    bool byte_swap = (rom_info->endianness == ENDIANNESS_BYTE_SWAP);   // SC64SS: a .v64 file, read as the cart will hold it
+    rom_info->libdragon_old = (!rom_info->libdragon) && rom_old_libdragon_entry(path, byte_swap);
+    rom_info->libdragon_handoff = rom_info->libdragon && rom_libdragon_handoff(path, byte_swap);
     rom_info->check_code_from_content = false;
     if (rom_info->check_code == 0) {
         // SC64SS: a ROM built without a header check code (libdragon's tools leave it

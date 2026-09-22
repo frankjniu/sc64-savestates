@@ -111,6 +111,9 @@ typedef enum {
     EXPANSION_PAK_FAULTY,           /**< Faulty with 8MB of memory */
 } rom_expansion_pak_t;
 
+/** @brief SC64SS: room for a hotkey's text: every button named, "L+R+Z+...+C-Right", is 61 characters */
+#define SC64SS_KEY_TEXT_LEN (64)
+
 /** @brief ROM Information Structure. */
 typedef struct {
     rom_endianness_t endianness;    /**< The file endian */
@@ -172,12 +175,12 @@ typedef struct {
         bool watch_reads;           /**< SC64SS: the engine's watchpoint covers reads of the vector at 0x180 too (on by default; a built-in list and watch_reads=0 in the ini switch it off for titles whose own reads of the vector must not be redirected) */
         bool patches_enabled;       /**< Patches enabled */
         bool clear_rdram_enabled;   /**< Zero RDRAM before boot (workaround for ROMs with incomplete BSS init) */
-        char hotkey_save[32];       /**< SC64SS: this ROM's own quick save buttons ("L+R+Up"; empty: the menu's setting) */
-        char hotkey_load[32];       /**< SC64SS: ... quick load */
-        char hotkey_panel[32];      /**< SC64SS: ... the slot panel */
-        char hotkey_step[32];       /**< SC64SS: ... the frame step button */
+        char hotkey_save[SC64SS_KEY_TEXT_LEN];  /**< SC64SS: this ROM's own quick save buttons ("L+R+Up"; empty: the menu's setting) */
+        char hotkey_load[SC64SS_KEY_TEXT_LEN];  /**< SC64SS: ... quick load */
+        char hotkey_panel[SC64SS_KEY_TEXT_LEN]; /**< SC64SS: ... the slot panel */
+        char hotkey_step[SC64SS_KEY_TEXT_LEN];  /**< SC64SS: ... the frame step button */
         int hotkey_set[5];          /**< SC64SS: the menu's count of every-game sets when each own hotkey or the screenshot button was set (hotkey_save_set ..., screenshot_button_set): an own one older than the last every-game set of it does not count */
-        char screenshot_button[32]; /**< SC64SS: the screenshot button (empty: none) */
+        char screenshot_button[SC64SS_KEY_TEXT_LEN]; /**< SC64SS: the screenshot button (empty: none) */
     } settings;                     /**< The ROM settings */
 
     struct {
@@ -313,7 +316,7 @@ uint16_t sc64ss_keys_parse (const char *text);
 /** SC64SS: a game's own hotkey counts when it reads as something and was set no earlier than
  *  the menu's last set of that hotkey for every game */
 static inline bool sc64ss_key_own (const char *rom_text, int rom_set, int menu_set) {
-    return rom_text[0] && (rom_set >= menu_set);
+    return rom_text[0] && sc64ss_keys_parse(rom_text) && (rom_set >= menu_set);
 }
 char *sc64ss_keys_text (uint16_t mask, char *buf, size_t len);
 

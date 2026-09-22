@@ -9,9 +9,11 @@
  * own settings live in its ini (hotkey_save and friends, screenshot_button); the
  * menu's in config.ini. A hotkey is one button or more and may not sit inside another
  * (the frame step button aside: it acts at the panel's Step speed only); the game never
- * sees a hotkey's buttons while it is held. L + R + Start is refused: an original
+ * sees a hotkey's buttons while it is held. L + R + Start can't be one: an original
  * controller answers it with its stick reset (Start reported released, the reset flag
- * set), so it could never match.
+ * set), so it could never match. libdragon hands the buttons on without that flag, so
+ * the page sees L + R from such a controller; a controller that reports all three is
+ * refused.
  */
 
 #include <libdragon.h>
@@ -39,7 +41,7 @@ static bool release_wait = false;   // after a capture: everything up before the
 static char message[96] = "";
 static int message_frames = 0;
 static int ask_row = -1;            // a game's page after a hold: the row waiting for "this game or every game"
-static char ask_text[40] = "";
+static char ask_text[SC64SS_KEY_TEXT_LEN] = "";
 
 
 static int rows_shown (menu_t *menu) {
@@ -48,11 +50,9 @@ static int rows_shown (menu_t *menu) {
 }
 
 static uint16_t buttons_now (void) {
-    uint16_t raw = joypad_get_buttons_held(JOYPAD_PORT_1).raw;
-    if (raw & 0x0080) {
-        raw |= 0x1000;              // the reset flag: an original controller under L + R + Start
-    }
-    return raw & 0xFF3F;            // never the reset bit or the unused one
+    // 0x0080 and 0x0040 are a GameCube controller's Y and X in libdragon's layout, no N64
+    // button (libdragon fills them with zeros for an N64 controller, its reset flag included)
+    return joypad_get_buttons_held(JOYPAD_PORT_1).raw & 0xFF3F;
 }
 
 static int popcount16 (uint16_t v) {
@@ -96,12 +96,13 @@ static int *menu_set_field (menu_t *menu, int r) {
     }
 }
 
-// the text a row stands at: the ROM's own when set, else the menu's; *own says which
+// the text a row stands at: the ROM's own when set, else the menu's; *own says which. The
+// launch's test (sc64ss_key_own): an own text that reads as no buttons does not count, so
+// the page shows, and checks against, what the game gets
 static const char *row_text (menu_t *menu, int r, bool *own) {
     if (menu->hotkeys_for_rom) {
         const char *t = rom_field(menu, r);
-        int *ms = menu_set_field(menu, r);
-        if (t[0] && (!ms || (menu->load.rom_info.settings.hotkey_set[r] >= *ms))) {
+        if (sc64ss_key_own(t, menu->load.rom_info.settings.hotkey_set[r], *menu_set_field(menu, r))) {
             *own = true;
             return t;
         }
@@ -151,10 +152,29 @@ static const char *check_mask (menu_t *menu, int r, uint16_t m) {
     return NULL;
 }
 
+// the same check against the keys every game has (from a game's page, before a Z)
+static const char *check_mask_every (menu_t *menu, int r, uint16_t m) {
+    bool for_rom = menu->hotkeys_for_rom;
+    menu->hotkeys_for_rom = false;
+    const char *why = check_mask(menu, r, m);
+    menu->hotkeys_for_rom = for_rom;
+    return why;
+}
+
+// the buttons a row goes back to with R: on a game's page the menu's (read as the launch
+// reads them), on the menu's page the built-in ones; the screenshot button: none
+static uint16_t row_fallback (menu_t *menu, int r) {
+    uint16_t m = menu->hotkeys_for_rom ? sc64ss_keys_parse(*menu_field(menu, r)) : 0;
+    if (!m && (r != ROW_SHOT)) {
+        m = sc64ss_keys_parse(row_defaults[r]);
+    }
+    return m;
+}
+
 // a row's new text for this game (NULL: back to what every game has), with the menu's
 // count beside it so the key counts from now on
 static void store_rom (menu_t *menu, int r, const char *text) {
-    snprintf(rom_field(menu, r), 32, "%s", text ? text : "");
+    snprintf(rom_field(menu, r), SC64SS_KEY_TEXT_LEN, "%s", text ? text : "");
     rom_config_setting_set_text(menu->load.rom_path, row_ids[r], text);
     int *ms = menu_set_field(menu, r);
     if (ms) {
@@ -229,7 +249,7 @@ static void process (menu_t *menu) {
                 ask_row = capture;
                 sound_play_effect(SFX_SETTING);
             } else {
-                char t[40];
+                char t[SC64SS_KEY_TEXT_LEN];
                 sc64ss_keys_text(now, t, sizeof(t));
                 store(menu, capture, t);
                 show_message("Set.");
@@ -255,9 +275,16 @@ static void process (menu_t *menu) {
             sound_play_effect(SFX_SETTING);
             ask_row = -1;
         } else if (menu->actions.lz_context) {
-            store_menu(menu, ask_row, ask_text);
-            show_message("Set for every game.");
-            sound_play_effect(SFX_SETTING);
+            // every game gets it beside every game's other keys, so it is checked against those
+            // too (the hold checked it against this game's)
+            if (check_mask_every(menu, ask_row, sc64ss_keys_parse(ask_text))) {
+                show_message("Not for every game: it clashes with\nanother of every game's hotkeys.");
+                sound_play_effect(SFX_ERROR);
+            } else {
+                store_menu(menu, ask_row, ask_text);
+                show_message("Set for every game.");
+                sound_play_effect(SFX_SETTING);
+            }
             ask_row = -1;
         } else if (menu->actions.back) {
             show_message("Left as it was.");
@@ -286,13 +313,20 @@ static void process (menu_t *menu) {
         idle_frames = 0;
         sound_play_effect(SFX_ENTER);
     } else if (menu->actions.options) {
-        store(menu, row, NULL);
-        if (menu->hotkeys_for_rom) {
-            show_message("Back to what every game has.");
+        // back to the default only when it fits beside the other keys, as a new setting must
+        uint16_t back = row_fallback(menu, row);
+        if (back && check_mask(menu, row, back)) {
+            show_message("Left as it was: the default clashes\nwith another hotkey. Change that one first.");
+            sound_play_effect(SFX_ERROR);
         } else {
-            show_message((row == ROW_SHOT) ? "Screenshot button: none, for every game." : "Back to the built-in setting.");
+            store(menu, row, NULL);
+            if (menu->hotkeys_for_rom) {
+                show_message("Back to what every game has.");
+            } else {
+                show_message((row == ROW_SHOT) ? "Screenshot button: none, for every game." : "Back to the built-in setting.");
+            }
+            sound_play_effect(SFX_SETTING);
         }
-        sound_play_effect(SFX_SETTING);
     } else if (menu->actions.back) {
         sound_play_effect(SFX_EXIT);
         menu->next_mode = menu->hotkeys_for_rom ? MENU_MODE_LOAD_ROM : MENU_MODE_SETTINGS_EDITOR;
@@ -300,7 +334,7 @@ static void process (menu_t *menu) {
 }
 
 static void draw (menu_t *menu, surface_t *d) {
-    char body[640], t[40];
+    char body[640], t[SC64SS_KEY_TEXT_LEN];
     size_t used = 0;
 
     rdpq_attach(d, NULL);

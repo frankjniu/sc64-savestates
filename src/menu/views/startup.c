@@ -17,8 +17,12 @@ void view_startup_init (menu_t *menu) {
 
         if (menu->settings.rom_autoload_enabled && b_held.start) {
             menu->settings.rom_autoload_enabled = false;
-            menu->settings.rom_autoload_path = "";
-            menu->settings.rom_autoload_filename = "";
+            // SC64SS: heap strings, as settings_load leaves them: "Set ROM to autoload" frees
+            // these, and a string literal freed corrupts the heap
+            free(menu->settings.rom_autoload_path);
+            menu->settings.rom_autoload_path = strdup("");
+            free(menu->settings.rom_autoload_filename);
+            menu->settings.rom_autoload_filename = strdup("");
             settings_save(&menu->settings);
         }
     }
@@ -35,11 +39,8 @@ void view_startup_init (menu_t *menu) {
     if (menu->settings.first_run) {
         menu->settings.first_run = false;
         settings_save(&menu->settings);
-        menu->next_mode = MENU_MODE_CREDITS;
     }
-    else {
-        menu->next_mode = MENU_MODE_BROWSER;
-    }
+    menu->next_mode = MENU_MODE_BROWSER;    // SC64SS: straight to the game browser, first run included (Menu information stays under Start)
 }
 
 void view_startup_display (menu_t *menu, surface_t *display) {
